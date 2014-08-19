@@ -1,4 +1,4 @@
-defmodule Plug.Connection.Cookies do
+defmodule Plug.Conn.Cookies do
   @moduledoc """
   Conveniences for encoding and decoding cookies
   """
@@ -12,19 +12,19 @@ defmodule Plug.Connection.Cookies do
   ## Examples
 
       iex> decode("key1=value1, key2=value2")
-      [{ "key1", "value1" }, { "key2", "value2" }]
+      %{"key1" => "value1", "key2" => "value2"}
 
   """
   def decode(cookie) do
-    decode_each(:binary.split(cookie, [";", ","], [:global]))
+    decode(:binary.split(cookie, [";", ","], [:global]), %{})
   end
 
-  defp decode_each([]),
-    do: []
-  defp decode_each([h|t]) do
+  defp decode([], acc),
+    do: acc
+  defp decode([h|t], acc) do
     case decode_kv(h) do
-      { _, _ } = kv -> [kv|decode_each(t)]
-      false -> decode_each(t)
+      {k, v} -> decode(t, Map.put(acc, k, v))
+      false  -> decode(t, acc)
     end
   end
 
@@ -49,7 +49,7 @@ defmodule Plug.Connection.Cookies do
     do: decode_key(t, << key :: binary, h >>)
 
   defp decode_value("", _spaces, key, value),
-    do: { key, value }
+    do: {key, value}
   defp decode_value(<< ?\s, t :: binary >>, spaces, key, value),
     do: decode_value(t, << spaces :: binary, ?\s >>, key, value)
   defp decode_value(<< h, _ :: binary >>, _spaces, _key, _value) when h in [?\t, ?\r, ?\n, ?\v, ?\f],
@@ -60,11 +60,8 @@ defmodule Plug.Connection.Cookies do
   @doc """
   Encodes the given cookies as expected in a response header.
   """
-  @doc """
-  Receives a cookie key with options and returns a cookie header.
-  """
-  def encode(key, opts // []) do
-    header = "#{key}=#{Keyword.get(opts, :value, "")}; path=#{Keyword.get(opts, :path, "/")}"
+  def encode(key, opts \\ %{}) do
+    header = "#{key}=#{opts[:value]}; path=#{opts[:path] || "/"}"
 
     if domain = opts[:domain] do
       header = header <> "; domain=#{domain}"
@@ -73,7 +70,7 @@ defmodule Plug.Connection.Cookies do
     if max_age = opts[:max_age] do
       time = opts[:universal_time] || :calendar.universal_time
       time = add_seconds(time, max_age)
-      header = header <> "; expires=" <> rfc2822(time) <> "; max-age=" <> integer_to_binary(max_age)
+      header = header <> "; expires=" <> rfc2822(time) <> "; max-age=" <> Integer.to_string(max_age)
     end
 
     if opts[:secure] do
@@ -88,21 +85,21 @@ defmodule Plug.Connection.Cookies do
   end
 
   defp pad(number) when number in 0..9 do
-    << ?0, ?0 + number >>
+    <<?0, ?0 + number>>
   end
 
   defp pad(number) do
-    integer_to_binary(number)
+    Integer.to_string(number)
   end
 
-  defp rfc2822({ { year, month, day } = date, { hour, minute, second } }) do
+  defp rfc2822({{year, month, day} = date, {hour, minute, second}}) do
     weekday_name  = weekday_name(:calendar.day_of_the_week(date))
     month_name    = month_name(month)
     padded_day    = pad(day)
     padded_hour   = pad(hour)
     padded_minute = pad(minute)
     padded_second = pad(second)
-    binary_year   = integer_to_binary(year)
+    binary_year   = Integer.to_string(year)
 
     weekday_name <> ", " <> padded_day <>
       " " <> month_name <> " " <> binary_year <>

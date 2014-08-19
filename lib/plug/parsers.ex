@@ -1,28 +1,28 @@
 defmodule Plug.Parsers do
   message = "the request is too large. If you are willing to process " <>
-            "larger requests, please give a :limit to Plug.Parsers"
+            "larger requests, please give a :length to Plug.Parsers"
 
-  defexception RequestTooLargeError, [:message] do
+  defmodule RequestTooLargeError do
     @moduledoc """
     Error raised when the request is too large
     """
 
+    defexception [:message]
+
     defimpl Plug.Exception do
-      def status(_exception) do
-        413
-      end
+      def status(_exception), do: 413
     end
   end
 
-  defexception UnsupportedMediaTypeError, [:message] do
+  defmodule UnsupportedMediaTypeError do
     @moduledoc """
     Error raised when the request body cannot be parsed
     """
 
+    defexception [:message]
+
     defimpl Plug.Exception do
-      def status(_exception) do
-        415
-      end
+      def status(_exception), do: 415
     end
   end
 
@@ -34,14 +34,21 @@ defmodule Plug.Parsers do
   * `:parsers` - a set of modules to be invoked for parsing.
                  These modules need to implement the behaviour
                  outlined in this module.
+  * `:accept`  - an optional list of accepted mime type strings. Any mime
+                 not handled by a parser and not explicitly accepted will
+                 raise UnsupportedMediaTypeError. ie:
+                 * ["*/*"] - never raise
+                 * ["text/html", "application/*"] - don't raise for those values
+                 * [] - always raise (default)
 
-  * `:limit` - the request size limit we accept to parse.
-               Defaults to 8,000,000 bytes.
+  All options supported by `Plug.Conn.read_body/2` are also
+  supported here.
 
   ## Examples
 
-      Plug.Parsers.call(conn, parsers:
-                        [Plug.Parsers.URLENCODED, Plug.Parsers.MULTIPART])
+      plug Plug.Parsers, parsers: [:urlencoded, :multipart]
+      plug Plug.Parsers, parsers: [:urlencoded, :multipart],
+                         accept:  ["application/json", "text/*"]
 
   ## Built-in parsers
 
@@ -50,9 +57,10 @@ defmodule Plug.Parsers do
   * `Plug.Parsers.URLENCODED` - parses "application/x-www-form-urlencoded" requests
   * `Plug.Parsers.MULTIPART` - parses "multipart/form-data" and "multipart/mixed" requests
 
-  This plug will raise `Plug.Parsers.UnsupportedMediaTypeError` if
-  the request cannot be parsed by any of the given types and raise
-  `Plug.Parsers.RequestTooLargeError` if the request goes over the
+  This plug will raise `Plug.Parsers.UnsupportedMediaTypeError` by default if the request
+  cannot be parsed by any of the given types and the mime type has not been
+  explicity accepted in the `:accept` option.
+  `Plug.Parsers.RequestTooLargeError` will be raised  if the request goes over the
   given limit.
 
   ## File handling
@@ -62,8 +70,8 @@ defmodule Plug.Parsers do
   avoiding loading the whole file into memory. For such, it is
   required that the `:plug` application is started.
 
-  In those cases, the parameter will return a `Plug.Upload.File`
-  record with information about the file and its content type.
+  In those cases, the parameter will return a `Plug.Upload`
+  struct with information about the file and its content type.
 
   You can customize the temporary directory by setting the `PLUG_TMPDIR`
   environment variable in your system.
@@ -74,57 +82,79 @@ defmodule Plug.Parsers do
 
   @doc """
   Attempt to parse the connection request body given the type,
-  subtype and headers. Returns `{ :ok, conn }` if the parser can
-  handle the given content type, `{ :halt, conn }` otherwise.
+  subtype and headers. Returns `{:ok, conn}` if the parser can
+  handle the given content type, `{:halt, conn}` otherwise.
   """
   defcallback parse(Conn.t, type :: binary, subtype :: binary,
                     headers :: Keyword.t, opts :: Keyword.t) ::
-                    { :ok, Conn.params, Conn.t } |
-                    { :too_large, Conn.t } |
-                    { :skip, Conn.t }
+                    {:ok, Conn.params, Conn.t} |
+                    {:error, :too_large, Conn.t} |
+                    {:skip, Conn.t}
 
-  def call(Conn[req_headers: req_headers] = conn, opts) do
-    conn = Plug.Connection.fetch_params(conn)
-    case List.keyfind(req_headers, "content-type", 0) do
-      { "content-type", ct } ->
-        case Plug.Connection.Utils.content_type(ct) do
-          { :ok, type, subtype, headers } ->
-            parsers = Keyword.get(opts, :parsers) || raise_missing_parsers
-            opts    = Keyword.put_new(opts, :limit, 8_000_000)
-            reduce(conn, parsers, type, subtype, headers, opts)
-          :error ->
-            { :ok, conn }
-        end
-      nil ->
-        { :ok, conn }
-    end
-  end
+  @behaviour Plug
+  @methods ~w(POST PUT PATCH)
 
-  defp reduce(conn, [h|t], type, subtype, headers, opts) do
-    case h.parse(conn, type, subtype, headers, opts) do
-      { :ok, post, Conn[params: get] = conn } ->
-        { :ok, conn.params(merge_params(get, post)) }
-      { :next, conn } ->
-        reduce(conn, t, type, subtype, headers, opts)
-      { :too_large, _conn } ->
-        raise Plug.Parsers.RequestTooLargeError
-    end
-  end
-
-  defp reduce(_conn, [], type, subtype, _headers, _opts) do
-    raise UnsupportedMediaTypeError,
-          message: "unsupported media type #{type}/#{subtype}"
-  end
-
-  defp merge_params([], post), do: post
-  defp merge_params([{ k, _ }=h|t], post) do
-    case :lists.keyfind(k, 1, post) do
-      { _, _ } -> merge_params(t, post)
-      false -> merge_params(t, [h|post])
-    end
+  def init(opts) do
+    parsers = Keyword.get(opts, :parsers) || raise_missing_parsers
+    opts
+    |> Keyword.put(:parsers, convert_parsers(parsers))
+    |> Keyword.put_new(:length, 8_000_000)
+    |> Keyword.put_new(:accept, [])
   end
 
   defp raise_missing_parsers do
     raise ArgumentError, message: "Plug.Parsers expects a set of parsers to be given in :parsers"
+  end
+
+  defp convert_parsers(parsers) do
+    for parser <- parsers do
+      case Atom.to_string(parser) do
+        "Elixir." <> _ -> parser
+        reference      -> Module.concat(Plug.Parsers, String.upcase(reference))
+      end
+    end
+  end
+
+  def call(%Conn{req_headers: req_headers, method: method} = conn, opts) when method in @methods do
+    conn = Plug.Conn.fetch_params(conn)
+    case List.keyfind(req_headers, "content-type", 0) do
+      {"content-type", ct} ->
+        case Plug.Conn.Utils.content_type(ct) do
+          {:ok, type, subtype, headers} ->
+            reduce(conn, Keyword.fetch!(opts, :parsers), type, subtype, headers, opts)
+          :error ->
+            conn
+        end
+      nil ->
+        conn
+    end
+  end
+
+  def call(conn, _opts) do
+    Plug.Conn.fetch_params(conn)
+  end
+
+  defp reduce(conn, [h|t], type, subtype, headers, opts) do
+    case h.parse(conn, type, subtype, headers, opts) do
+      {:ok, post, %Conn{params: get} = conn} ->
+        %{conn | params: Map.merge(get, post)}
+      {:next, conn} ->
+        reduce(conn, t, type, subtype, headers, opts)
+      {:error, :too_large, _conn} ->
+        raise Plug.Parsers.RequestTooLargeError
+    end
+  end
+
+  defp reduce(conn, [], type, subtype, _headers, opts) do
+    ensure_accepted_mimes(conn, type, subtype, Keyword.fetch!(opts, :accept))
+  end
+
+  defp ensure_accepted_mimes(conn, _type, _subtype, ["*/*"]), do: conn
+  defp ensure_accepted_mimes(conn, type, subtype, accept) do
+    if "#{type}/#{subtype}" in accept || "#{type}/*" in accept do
+      conn
+    else
+      raise UnsupportedMediaTypeError, message: "unsupported media type #{type}/#{subtype}"
+    end
   end
 end

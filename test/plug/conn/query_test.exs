@@ -1,8 +1,8 @@
-defmodule Plug.Connection.QueryTest do
+defmodule Plug.Conn.QueryTest do
   use ExUnit.Case, async: true
 
-  import Plug.Connection.Query, only: [decode: 1]
-  doctest Plug.Connection.Query
+  import Plug.Conn.Query, only: [decode: 1, encode: 1]
+  doctest Plug.Conn.Query
 
   test "decode queries" do
     params = decode "foo=bar&baz=bat"
@@ -45,44 +45,74 @@ defmodule Plug.Connection.QueryTest do
   end
 
   test "decode_pair simple queries" do
-    params = decode_pair [{ "foo", "bar" }, { "baz", "bat" }]
+    params = decode_pair [{"foo", "bar"}, {"baz", "bat"}]
     assert params["foo"] == "bar"
     assert params["baz"] == "bat"
   end
 
   test "decode_pair one-level nested query" do
-    params = decode_pair [{ "users[name]", "hello" }]
+    params = decode_pair [{"users[name]", "hello"}]
     assert params["users"]["name"] == "hello"
 
-    params = decode_pair [{ "users[name]", "hello" }, { "users[age]", "17" }]
+    params = decode_pair [{"users[name]", "hello"}, {"users[age]", "17"}]
     assert params["users"]["name"] == "hello"
     assert params["users"]["age"]  == "17"
   end
 
   test "decode_pair query no override" do
-    params = decode_pair [{ "foo", "bar" }, { "foo", "baz" }]
+    params = decode_pair [{"foo", "bar"}, {"foo", "baz"}]
     assert params["foo"] == "baz"
 
-    params = decode_pair [{ "users[name]", "bar" }, { "users[name]", "baz" }]
+    params = decode_pair [{"users[name]", "bar"}, {"users[name]", "baz"}]
     assert params["users"]["name"] == "baz"
   end
 
   test "decode_pair many-levels nested query" do
-    params = decode_pair [{ "users[name]", "hello" }]
+    params = decode_pair [{"users[name]", "hello"}]
     assert params["users"]["name"] == "hello"
 
-    params = decode_pair [{ "users[name]", "hello" }, { "users[age]", "17" }, { "users[address][street]", "Mourato" }]
+    params = decode_pair [{"users[name]", "hello"}, {"users[age]", "17"}, {"users[address][street]", "Mourato"}]
     assert params["users"]["name"]              == "hello"
     assert params["users"]["age"]               == "17"
     assert params["users"]["address"]["street"] == "Mourato"
   end
 
   test "decode_pair list query" do
-    params = decode_pair [{ "foo[]", "bar" }, { "foo[]", "baz" }]
+    params = decode_pair [{"foo[]", "bar"}, {"foo[]", "baz"}]
     assert params["foo"] == ["bar", "baz"]
   end
 
   defp decode_pair(pairs) do
-    Enum.reduce Enum.reverse(pairs), [], &Plug.Connection.Query.decode_pair(&1, &2)
+    Enum.reduce Enum.reverse(pairs), %{}, &Plug.Conn.Query.decode_pair(&1, &2)
   end
+
+
+  test "encode" do
+    assert encode(%{foo: "bar", baz: "bat"}) == "baz=bat&foo=bar"
+
+    assert encode(%{foo: "bå®"}) == "foo=b%C3%A5%C2%AE"
+    assert encode(%{foo: 1337})  == "foo=1337"
+    assert encode(%{foo: ["bar", "baz"]}) == "foo[]=bar&foo[]=baz"
+
+    assert encode(%{users: %{name: "hello", age: 17}}) == "users[age]=17&users[name]=hello"
+    assert encode(%{users: [name: "hello", age: 17]}) == "users[name]=hello&users[age]=17"
+    assert encode(%{users: [name: "hello", age: 17, name: "goodbye"]}) == "users[name]=hello&users[age]=17"
+
+    assert encode(%{"my weird field": "q1!2\"'w$5&7/z8)?"}) == "my+weird+field=q1%212%22%27w%245%267%2Fz8%29%3F"
+    assert encode(%{foo: %{"my weird field": "q1!2\"'w$5&7/z8)?"}}) == "foo[my+weird+field]=q1%212%22%27w%245%267%2Fz8%29%3F"
+
+    assert encode(%{}) == ""
+    assert encode([]) == ""
+
+    assert encode(%{foo: [""]}) == "foo[]="
+
+    assert encode(%{foo: ["bar", "baz"], bat: [1, 2]}) == "bat[]=1&bat[]=2&foo[]=bar&foo[]=baz"
+
+    assert encode(%{x: %{y: %{z: 1}}}) == "x[y][z]=1"
+    assert encode(%{x: %{y: %{z: [1]}}}) == "x[y][z][]=1"
+    assert encode(%{x: %{y: %{z: [1, 2]}}}) == "x[y][z][]=1&x[y][z][]=2"
+    assert encode(%{x: %{y: [%{z: 1}]}}) == "x[y][][z]=1"
+    assert encode(%{x: %{y: [%{z: [1]}]}}) == "x[y][][z][]=1"
+  end
+
 end

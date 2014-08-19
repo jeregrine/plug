@@ -1,4 +1,4 @@
-defmodule Plug.Connection.Query do
+defmodule Plug.Conn.Query do
   @moduledoc """
   Conveniences for decoding and encoding url encoded queries
 
@@ -25,12 +25,38 @@ defmodule Plug.Connection.Query do
       iex> decode("foo[]=bar&foo[]=baz")["foo"]
       ["bar", "baz"]
 
+
+  Encoding Dicts:
+
+      iex> encode(%{foo: "bar", baz: "bat"})
+      "baz=bat&foo=bar"
+
+  Encoding keyword lists preserves field order:
+
+      iex> encode([foo: "bar", baz: "bat"])
+      "foo=bar&baz=bat"
+
+  Encoding keyword lists with duplicate keys, first one wins:
+
+      iex> encode([foo: "bar", foo: "bat"])
+      "foo=bar"
+
+  Encoding named lists:
+
+      iex> encode(%{foo: ["bar", "baz"]})
+      "foo[]=bar&foo[]=baz"
+
+  Encoding nested structures:
+
+      iex> encode(%{foo: %{bar: "baz"}})
+      "foo[bar]=baz"
+
   """
 
   @doc """
   Decodes the given binary.
   """
-  def decode(query, initial // [])
+  def decode(query, initial \\ %{})
 
   def decode("", initial) do
     initial
@@ -49,7 +75,7 @@ defmodule Plug.Connection.Query do
   Parameters lists are added to the accumulator in reverse
   order, so be sure to pass the parameters in reverse order.
   """
-  def decode_pair({ key, value }, acc) do
+  def decode_pair({key, value}, acc) do
     parts =
       if key != "" and :binary.last(key) == ?] do
         # Remove trailing ]
@@ -75,10 +101,7 @@ defmodule Plug.Connection.Query do
   # We always assign the value in the last segment.
   # `age=17` would match here.
   defp assign_parts([key], value, acc) do
-    case :lists.keyfind(key, 1, acc) do
-      { _, _ } -> acc
-      false -> put(key, value, acc)
-    end
+    Map.put_new(acc, key, value)
   end
 
   # The current segment is a list. We simply prepend
@@ -86,25 +109,25 @@ defmodule Plug.Connection.Query do
   # not yet. This assumes that items are iterated in
   # reverse order.
   defp assign_parts([key,""|t], value, acc) do
-    case :lists.keyfind(key, 1, acc) do
-      { ^key, [h|_] = current } when not is_tuple(h) ->
-        replace(key, assign_list(t, current, value), acc)
-      false ->
-        put(key, assign_list(t, [], value), acc)
+    case Map.fetch(acc, key) do
+      {:ok, current} when is_list(current) ->
+        Map.put(acc, key, assign_list(t, current, value))
+      :error ->
+        Map.put(acc, key, assign_list(t, [], value))
       _ ->
         acc
     end
   end
 
   # The current segment is a parent segment of a
-  # dict. We need to create a dictionary and then
+  # map. We need to create a map and then
   # continue looping.
   defp assign_parts([key|t], value, acc) do
-    case :lists.keyfind(key, 1, acc) do
-      { ^key, [h|_] = current } when is_tuple(h) ->
-        replace(key, assign_parts(t, value, current), acc)
-      false ->
-        put(key, assign_parts(t, value, []), acc)
+    case Map.fetch(acc, key) do
+      {:ok, %{} = current} ->
+        Map.put(acc, key, assign_parts(t, value, current))
+      :error ->
+        Map.put(acc, key, assign_parts(t, value, %{}))
       _ ->
         acc
     end
@@ -115,15 +138,47 @@ defmodule Plug.Connection.Query do
   end
 
   defp assign_list([], value), do: value
-  defp assign_list(t, value),  do: assign_parts(t, value, [])
+  defp assign_list(t, value),  do: assign_parts(t, value, %{})
 
-  @compile { :inline, put: 3, replace: 3 }
-
-  defp put(key, value, acc) do
-    [{ key, value }|acc]
+  @doc """
+  Encodes the given dict.
+  """
+  def encode(dict) do
+    encode_pair(nil, dict)
   end
 
-  defp replace(key, value, acc) do
-    [{ key, value }|:lists.keydelete(key, 1, acc)]
+  # covers maps
+  defp encode_pair(parent_field, dict) when is_map(dict) do
+    encode_dict(dict, parent_field)
+  end
+
+  # covers keyword lists
+  defp encode_pair(parent_field, list) when is_list(list) and is_tuple(hd(list)) do
+    encode_dict(Enum.uniq(list, &elem(&1, 0)), parent_field)
+  end
+
+  # covers non-keyword lists
+  defp encode_pair(parent_field, list) when is_list(list) do
+    Enum.map_join list, "&", &encode_pair("#{parent_field}[]", &1)
+  end
+
+  defp encode_pair(field, value) do
+    field <> "=" <> encode_www_form(value)
+  end
+
+  defp encode_dict(dict, parent_field) do
+    Enum.map_join(dict, "&", fn {field, value} ->
+      field = if parent_field do
+        "#{parent_field}[#{encode_www_form(field)}]"
+      else
+        encode_www_form(field)
+      end
+
+      encode_pair(field, value)
+    end)
+  end
+
+  defp encode_www_form(item) do
+    item |> to_string |> URI.encode_www_form
   end
 end

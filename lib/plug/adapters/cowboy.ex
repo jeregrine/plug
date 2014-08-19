@@ -1,26 +1,30 @@
 defmodule Plug.Adapters.Cowboy do
   @moduledoc """
-  Adapter interface to the Cowboy webserver
+  Adapter interface to the Cowboy webserver.
 
   ## Options
 
   * `:ip` - the ip to bind the server to.
-            Must be a tuple in the format `{ x, y, z, w }`.
+    Must be a tuple in the format `{x, y, z, w}`.
 
   * `:port` - the port to run the server.
-              Defaults to 4000 (http) and 4040 (https).
+    Defaults to 4000 (http) and 4040 (https).
 
   * `:acceptors` - the number of acceptors for the listener.
-                   Defaults to 100.
+    Defaults to 100.
 
   * `:max_connections` - max number of connections supported.
-                         Defaults to :infinity.
+    Defaults to `:infinity`.
 
   * `:dispatch` - manually configure Cowboy's dispatch.
+    If this option is used, the plug given plug won't be initialized
+    nor dispatched to (and doing so becomes the user responsibility).
 
   * `:ref` - the reference name to be used.
-             Defaults to `plug.HTTP` (http) and `plug.HTTPS` (https).
-             This is the value that needs to be given on shutdown.
+    Defaults to `plug.HTTP` (http) and `plug.HTTPS` (https).
+    This is the value that needs to be given on shutdown.
+
+  * `:compress` - Cowboy will attempt to compress the response body.
 
   """
 
@@ -29,13 +33,13 @@ defmodule Plug.Adapters.Cowboy do
   def args(scheme, plug, opts, options) do
     options
     |> Keyword.put_new(:ref, build_ref(plug, scheme))
-    |> Keyword.put_new(:dispatch, dispatch_for(plug, opts))
+    |> Keyword.put_new(:dispatch, options[:dispatch] || dispatch_for(plug, opts))
     |> normalize_options(scheme)
     |> to_args()
   end
 
   @doc """
-  Runs cowboy under http.
+  Run cowboy under http.
 
   ## Example
 
@@ -46,12 +50,14 @@ defmodule Plug.Adapters.Cowboy do
       Plug.Adapters.Cowboy.shutdown MyPlug.HTTP
 
   """
-  def http(plug, opts, options // []) do
+  @spec http(module(), Keyword.t, Keyword.t) ::
+        {:ok, pid} | {:error, :eaddrinuse} | {:error, term}
+  def http(plug, opts, options \\ []) do
     run(:http, plug, opts, options)
   end
 
   @doc """
-  Runs cowboy under https.
+  Run cowboy under https.
 
   Besides the options described in the module documentation,
   this module also accepts all options defined in [the `ssl`
@@ -77,7 +83,9 @@ defmodule Plug.Adapters.Cowboy do
       Plug.Adapters.Cowboy.shutdown MyPlug.HTTPS
 
   """
-  def https(plug, opts, options // []) do
+  @spec https(module(), Keyword.t, Keyword.t) ::
+        {:ok, pid} | {:error, :eaddrinuse} | {:error, term}
+  def https(plug, opts, options \\ []) do
     :application.start(:asn1)
     :application.start(:public_key)
     :application.start(:ssl)
@@ -91,18 +99,35 @@ defmodule Plug.Adapters.Cowboy do
     :cowboy.stop_listener(ref)
   end
 
+  @doc """
+  Returns a child_spec to be supervised by your application.
+  """
+  def child_spec(scheme, plug, opts, options \\ []) do
+    [ref, nb_acceptors, trans_opts, proto_opts] = args(scheme, plug, opts, options)
+    ranch_module = case scheme do
+      :http -> :ranch_tcp
+      :https -> :ranch_ssl
+    end
+    :ranch.child_spec(ref, nb_acceptors, ranch_module, trans_opts, :cowboy_protocol, proto_opts)
+  end
+
   ## Helpers
 
   @http_options  [port: 4000]
   @https_options [port: 4040]
-  @not_options [:acceptors, :dispatch, :ref, :otp_app]
+  @not_options [:acceptors, :dispatch, :ref, :otp_app, :compress]
 
   defp run(scheme, plug, opts, options) do
     :application.start(:crypto)
     :application.start(:ranch)
     :application.start(:cowlib)
     :application.start(:cowboy)
-    apply(:cowboy, :"start_#{scheme}", args(scheme, plug, opts, options))
+    case apply(:cowboy, :"start_#{scheme}", args(scheme, plug, opts, options)) do
+      {:ok,pid} -> {:ok,pid}
+      {:error, {{:shutdown,{_, _,{{_,{:error, :eaddrinuse}},_}}},_}} ->
+        {:error, :eaddrinuse}
+      result -> result
+    end
   end
 
   defp normalize_options(options, :http) do
@@ -120,8 +145,9 @@ defmodule Plug.Adapters.Cowboy do
     ref       = options[:ref]
     acceptors = options[:acceptors] || 100
     dispatch  = :cowboy_router.compile(options[:dispatch])
+    compress  = options[:compress] || false
     options   = Keyword.drop(options, @not_options)
-    [ref, acceptors, options, [env: [dispatch: dispatch]]]
+    [ref, acceptors, options, [env: [dispatch: dispatch], compress: compress]]
   end
 
   defp build_ref(plug, scheme) do
@@ -129,7 +155,8 @@ defmodule Plug.Adapters.Cowboy do
   end
 
   defp dispatch_for(plug, opts) do
-    [{ :_, [ {:_, Plug.Adapters.Cowboy.Handler, { plug, opts } } ] }]
+    opts = plug.init(opts)
+    [{:_, [ {:_, Plug.Adapters.Cowboy.Handler, {plug, opts}} ]}]
   end
 
   defp normalize_ssl_file(key, options) do

@@ -2,30 +2,31 @@ defmodule Plug.Mixfile do
   use Mix.Project
 
   def project do
-    [ app: :plug,
-      version: "0.2.0",
-      elixir: "~> 0.12.2",
-      deps: deps(Mix.env),
-      docs: [ readme: true, main: "README" ] ]
+    [app: :plug,
+     version: "0.6.0",
+     elixir: "~> 0.15.0",
+     deps: deps,
+     package: package,
+     description: "A specification and conveniences for composable " <>
+                  "modules in between web applications",
+     docs: [readme: true, main: "README"]]
   end
 
   # Configuration for the OTP application
   def application do
-    [ applications: [:crypto],
-      mod: { Plug, [] } ]
+    [applications: [:crypto, :logger],
+     mod: {Plug, []}]
   end
 
-  def deps(:prod) do
-    [ { :cowboy, "~> 0.9", github: "extend/cowboy", optional: true } ]
+  def deps do
+    [{:cowboy, "~> 1.0.0", optional: true},
+     {:earmark, "~> 0.1", only: :docs},
+     {:ex_doc, "~> 0.5", only: :docs},
+     {:hackney, "~> 0.13", only: :test}]
   end
 
-  def deps(:docs) do
-    deps(:prod) ++
-      [ { :ex_doc, github: "elixir-lang/ex_doc" } ]
-  end
-
-  def deps(_) do
-    deps(:prod) ++
-      [ { :hackney, github: "benoitc/hackney" } ]
+  defp package do
+    %{licenses: ["Apache 2"],
+      links: %{"Github" => "https://github.com/elixir-lang/plug"}}
   end
 end
